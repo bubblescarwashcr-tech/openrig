@@ -619,7 +619,8 @@ export function createApp(deps: AppDeps): Hono {
   }
 
   // S4c — refuse browser-originated writes (and WebSocket upgrades) whose Origin or Host is not
-  // one of this daemon's own names. Registered before every /api route and the read-through edge.
+  // one of this daemon's own names, and any read whose Host is not (DNS rebinding). Registered
+  // before every /api route and the read-through edge.
   app.use("/api/*", originHostGuard(buildAllowedHosts({
     bindHosts: deps.bindPlan?.hosts ?? [],
     extraHosts: deps.requestHostAllowlist,
