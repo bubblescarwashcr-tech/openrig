@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
@@ -22,6 +22,7 @@ import { PodRepository } from "../src/domain/pod-repository.js";
 import { StartupOrchestrator } from "../src/domain/startup-orchestrator.js";
 import { PodBundleSourceResolver } from "../src/domain/bundle-source-resolver.js";
 import { createApp } from "../src/server.js";
+import { SessionTransport } from "../src/domain/session-transport.js";
 import { mockTmuxAdapter, unavailableCmuxAdapter } from "./helpers/test-app.js";
 import type { ExecFn } from "../src/adapters/tmux.js";
 import fs from "node:fs";
@@ -97,7 +98,7 @@ function createTempUiDist() {
   return dir;
 }
 
-function createAppWithUiDist(db: ReturnType<typeof createFullTestDb>, uiDistDir: string) {
+function createAppWithUiDist(db: ReturnType<typeof createFullTestDb>, uiDistDir: string, extra?: Partial<Parameters<typeof createApp>[0]>) {
   const fullSetup = createTestApp(db);
   return createApp({
     rigRepo: fullSetup.rigRepo,
@@ -127,6 +128,7 @@ function createAppWithUiDist(db: ReturnType<typeof createFullTestDb>, uiDistDir:
     podInstantiator: fullSetup.podInstantiator,
     podBundleSourceResolver: fullSetup.podBundleSourceResolver,
     uiDistDir,
+    ...extra,
   });
 }
 
@@ -361,5 +363,142 @@ describe("Hono server (production app)", () => {
 
     db1.close();
     db2.close();
+  });
+});
+
+// S4c — cross-origin write guard on /api/*, proven through the PRODUCTION createApp wiring.
+// The exploit shape: a browser "simple request" (text/plain body, so no CORS preflight) from a
+// foreign page, relying on the transport routes parsing the body as JSON regardless of
+// Content-Type, and on /broadcast with no target falling through to { global: true }.
+describe("S4c — Origin/Host guard on /api/* (production app)", () => {
+  function seedTwoRunningSeats(db: ReturnType<typeof createFullTestDb>) {
+    const rigRepo = new RigRepository(db);
+    const sessionRegistry = new SessionRegistry(db);
+    const rig = rigRepo.createRig("my-rig");
+    for (const [logical, name] of [["dev.impl", "dev-impl@my-rig"], ["dev.qa", "dev-qa@my-rig"]] as const) {
+      const node = rigRepo.addNode(rig.id, logical, { role: "worker", runtime: "claude-code" });
+      const sess = sessionRegistry.registerSession(node.id, name);
+      sessionRegistry.updateStatus(sess.id, "running");
+      sessionRegistry.updateBinding(node.id, { tmuxSession: name });
+    }
+    return { rigRepo, sessionRegistry };
+  }
+
+  function buildGuardedApp(extra?: { bindPlan?: { mode: "explicit" | "default"; hosts: string[]; tailscaleDetected: boolean }; requestHostAllowlist?: string[] }) {
+    const db = createFullTestDb();
+    const uiDistDir = createTempUiDist();
+    const { rigRepo, sessionRegistry } = seedTwoRunningSeats(db);
+    const sendText = vi.fn(async () => ({ ok: true as const }));
+    const tmux = {
+      ...mockTmuxAdapter(),
+      hasSession: async () => true,
+      probeSession: async () => ({ state: "present" as const }),
+      sendText,
+      sendKeys: async () => ({ ok: true as const }),
+      capturePaneContent: async () => "idle\n❯ ",
+      getPaneCommand: async () => null,
+    } as unknown as ReturnType<typeof mockTmuxAdapter>;
+    const sessionTransport = new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux });
+    const app = createAppWithUiDist(db, uiDistDir, {
+      sessionTransport,
+      permissionDriftObserver: { diagnose: () => null },
+      ...extra,
+    } as never);
+    const cleanup = () => { fs.rmSync(uiDistDir, { recursive: true, force: true }); db.close(); };
+    return { app, sendText, cleanup };
+  }
+
+  const broadcastBody = JSON.stringify({ text: "approve", force: true });
+
+  it("no-Origin write (CLI/relay/hook traffic) passes unchanged — untargeted /broadcast still fans out", async () => {
+    const { app, sendText, cleanup } = buildGuardedApp();
+    const res = await app.request("/api/transport/broadcast", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: broadcastBody,
+    });
+    expect(res.status).toBe(200);
+    expect((await res.json()).sent).toBe(2);
+    expect(sendText).toHaveBeenCalledTimes(2);
+    cleanup();
+  });
+
+  it("same-host loopback Origin passes", async () => {
+    const { app, cleanup } = buildGuardedApp();
+    const res = await app.request("http://127.0.0.1:7433/api/transport/broadcast", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Origin: "http://127.0.0.1:7433", Host: "127.0.0.1:7433" },
+      body: broadcastBody,
+    });
+    expect(res.status).toBe(200);
+    cleanup();
+  });
+
+  it("cross-origin text/plain untargeted /broadcast (the S4c exploit shape) is rejected 403 before any seat is driven", async () => {
+    const { app, sendText, cleanup } = buildGuardedApp();
+    const res = await app.request("http://127.0.0.1:7433/api/transport/broadcast", {
+      method: "POST",
+      headers: { "Content-Type": "text/plain", Origin: "http://evil.example.com", Host: "127.0.0.1:7433" },
+      body: broadcastBody,
+    });
+    expect(res.status).toBe(403);
+    expect((await res.json()).error).toBe("origin_rejected");
+    expect(sendText).not.toHaveBeenCalled();
+    cleanup();
+  });
+
+  it("cross-origin /send is rejected 403", async () => {
+    const { app, sendText, cleanup } = buildGuardedApp();
+    const res = await app.request("http://127.0.0.1:7433/api/transport/send", {
+      method: "POST",
+      headers: { "Content-Type": "text/plain", Origin: "http://evil.example.com", Host: "127.0.0.1:7433" },
+      body: JSON.stringify({ session: "dev-impl@my-rig", text: "1", force: true }),
+    });
+    expect(res.status).toBe(403);
+    expect(sendText).not.toHaveBeenCalled();
+    cleanup();
+  });
+
+  it("DNS-rebinding shape (Origin and Host both the attacker's name, resolved to loopback) is rejected 403", async () => {
+    const { app, sendText, cleanup } = buildGuardedApp();
+    const res = await app.request("http://rebind.evil.example.com:7433/api/transport/broadcast", {
+      method: "POST",
+      headers: { "Content-Type": "text/plain", Origin: "http://rebind.evil.example.com:7433", Host: "rebind.evil.example.com:7433" },
+      body: broadcastBody,
+    });
+    expect(res.status).toBe(403);
+    expect(sendText).not.toHaveBeenCalled();
+    cleanup();
+  });
+
+  it("tailnet bind: the bound tailscale IP and the daemon's MagicDNS name are accepted as Origin/Host", async () => {
+    const { app, cleanup } = buildGuardedApp({
+      bindPlan: { mode: "default", hosts: ["127.0.0.1", "100.101.102.103"], tailscaleDetected: true },
+      requestHostAllowlist: ["box.tail1234.ts.net", "box"],
+    });
+    for (const host of ["100.101.102.103:7433", "box.tail1234.ts.net:7433", "box:7433"]) {
+      const res = await app.request(`http://${host}/api/transport/broadcast`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Origin: `http://${host}`, Host: host },
+        body: broadcastBody,
+      });
+      expect(res.status, host).toBe(200);
+    }
+    cleanup();
+  });
+
+  it("tailnet bind: a DIFFERENT ts.net name (e.g. someone else's public Funnel page) is still rejected", async () => {
+    const { app, sendText, cleanup } = buildGuardedApp({
+      bindPlan: { mode: "default", hosts: ["127.0.0.1", "100.101.102.103"], tailscaleDetected: true },
+      requestHostAllowlist: ["box.tail1234.ts.net"],
+    });
+    const res = await app.request("http://127.0.0.1:7433/api/transport/broadcast", {
+      method: "POST",
+      headers: { "Content-Type": "text/plain", Origin: "https://attacker.tail9999.ts.net", Host: "127.0.0.1:7433" },
+      body: broadcastBody,
+    });
+    expect(res.status).toBe(403);
+    expect(sendText).not.toHaveBeenCalled();
+    cleanup();
   });
 });

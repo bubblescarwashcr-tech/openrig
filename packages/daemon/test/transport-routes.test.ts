@@ -21,6 +21,7 @@ import { EventBus } from "../src/domain/event-bus.js";
 import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
 import type { TmuxAdapter, TmuxResult } from "../src/adapters/tmux.js";
 import { transportRoutes } from "../src/routes/transport.js";
+import { buildAllowedHosts, originHostGuard } from "../src/middleware/origin-host-guard.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
 import { createFullTestDb } from "./helpers/test-app.js";
@@ -59,6 +60,8 @@ function mockTmux(overrides?: Partial<{
 
 function createApp(deps: { sessionTransport: SessionTransport; outboxHandler?: OutboxHandler }): Hono {
   const app = new Hono();
+  // S4c — mounted exactly as server.ts mounts it (before every /api route), loopback-only bind.
+  app.use("/api/*", originHostGuard(buildAllowedHosts({ bindHosts: ["127.0.0.1"] })));
   app.use("*", async (c, next) => {
     c.set("sessionTransport" as never, deps.sessionTransport);
     if (deps.outboxHandler) c.set("outboxHandler" as never, deps.outboxHandler);
@@ -614,6 +617,54 @@ describe("transport routes", () => {
     const body = await res.json();
     expect(body.total).toBe(2);
     expect(body.sent).toBe(2);
+  });
+
+  // S4c — the untargeted /broadcast falls through to { global: true }, so ONE cross-origin request would
+  // drive every seat. It must not bypass the Origin/Host guard, including via a text/plain simple
+  // request (no CORS preflight) that the route would otherwise parse as JSON.
+  it("S4c — cross-origin text/plain POST /broadcast with no target is rejected 403 and reaches no seat", async () => {
+    seedRig();
+    const sendText = vi.fn(async () => ({ ok: true as const }));
+    const transport = new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: mockTmux({ sendText }) });
+    const app = createApp({ sessionTransport: transport });
+
+    const res = await app.request("http://127.0.0.1:7433/api/transport/broadcast", {
+      method: "POST",
+      headers: { "Content-Type": "text/plain", Origin: "http://evil.example.com" },
+      body: JSON.stringify({ text: "global message", force: true }),
+    });
+    expect(res.status).toBe(403);
+    expect((await res.json()).error).toBe("origin_rejected");
+    expect(sendText).not.toHaveBeenCalled();
+  });
+
+  it("S4c — DNS-rebinding-shaped POST /broadcast (Origin == Host == attacker name) is rejected 403", async () => {
+    seedRig();
+    const sendText = vi.fn(async () => ({ ok: true as const }));
+    const transport = new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: mockTmux({ sendText }) });
+    const app = createApp({ sessionTransport: transport });
+
+    const res = await app.request("http://rebind.evil.example.com:7433/api/transport/broadcast", {
+      method: "POST",
+      headers: { "Content-Type": "text/plain", Origin: "http://rebind.evil.example.com:7433", Host: "rebind.evil.example.com:7433" },
+      body: JSON.stringify({ text: "global message", force: true }),
+    });
+    expect(res.status).toBe(403);
+    expect(sendText).not.toHaveBeenCalled();
+  });
+
+  it("S4c — same-host Origin POST /broadcast with no target still fans out", async () => {
+    seedRig();
+    const transport = new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: mockTmux() });
+    const app = createApp({ sessionTransport: transport });
+
+    const res = await app.request("http://127.0.0.1:7433/api/transport/broadcast", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Origin: "http://localhost:7433", Host: "127.0.0.1:7433" },
+      body: JSON.stringify({ text: "global message", force: true }),
+    });
+    expect(res.status).toBe(200);
+    expect((await res.json()).sent).toBe(2);
   });
 
   it("POST /broadcast with partial failure returns honest per-target outcomes", async () => {

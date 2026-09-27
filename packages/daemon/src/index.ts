@@ -25,6 +25,7 @@ import {
   isTailscaleBind,
   resolveToIpOrNull,
 } from "./middleware/auth-bearer-token.js";
+import { resolveExtraAllowedHosts } from "./middleware/origin-host-guard.js";
 import type { SlowOperationInstrumentation } from "./domain/slow-op-recorder.js";
 import type { ProviderService } from "./domain/provider/provider-service.js";
 import { SettingsStore } from "./domain/user-settings/settings-store.js";
@@ -294,10 +295,19 @@ export async function startServer(port?: number) {
     bindHosts = bindPlan.hosts;
   }
 
+  // S4c — names beyond the bound hosts that a legitimate browser may use (tailnet MagicDNS,
+  // operator OPENRIG_ALLOWED_HOSTS); consumed by the /api/* Origin/Host guard.
+  const requestHostAllowlist = await resolveExtraAllowedHosts({
+    bindHosts,
+    tailscaleDetected: bindPlan.tailscaleDetected,
+    envValue: process.env.OPENRIG_ALLOWED_HOSTS,
+  });
+
   const { app, contextMonitor, deps, eventLoopMonitor, injectWebSocket } = await createDaemon({
     dbPath,
     bearerToken,
     terminalBearerToken,
+    requestHostAllowlist,
     // S20 — the effective bind plan rides the health surface so adoption gates verify
     // listeners from BINDING EVIDENCE (probe each host) instead of config echo.
     bindPlan,

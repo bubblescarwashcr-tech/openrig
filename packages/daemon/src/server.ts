@@ -139,11 +139,15 @@ import { envRoutes } from "./routes/env.js";
 import type { RigLifecycleService } from "./domain/rig-lifecycle-service.js";
 import { seatRoutes } from "./routes/seat.js";
 import { createRouteTimingMiddleware } from "./domain/route-timing-recorder.js";
+import { buildAllowedHosts, originHostGuard } from "./middleware/origin-host-guard.js";
 
 export interface AppDeps {
   proofSourceWatch?: import("./domain/proof/source-watch.js").ProofSourceWatch;
   /** S20 — effective bind plan for the health surface (absent = legacy body). */
   bindPlan?: { mode: "explicit" | "default"; hosts: string[]; tailscaleDetected: boolean; ignoredRoutingHost?: string };
+  /** S4c — hostnames admitted by the /api/* Origin/Host guard beyond loopback + bindPlan.hosts
+   *  (OPENRIG_ALLOWED_HOSTS + discovered tailnet MagicDNS names). */
+  requestHostAllowlist?: string[];
   rigRepo: RigRepository;
   sessionRegistry: SessionRegistry;
   /** P7 — daemon lifecycle record store + this boot's epoch (heartbeat + clean-shutdown). */
@@ -613,6 +617,13 @@ export function createApp(deps: AppDeps): Hono {
   if (deps.slowOpRecorder?.recordRequest) {
     app.use("*", createSlowOpRequestMiddleware(deps.slowOpRecorder));
   }
+
+  // S4c — refuse browser-originated writes (and WebSocket upgrades) whose Origin or Host is not
+  // one of this daemon's own names. Registered before every /api route and the read-through edge.
+  app.use("/api/*", originHostGuard(buildAllowedHosts({
+    bindHosts: deps.bindPlan?.hosts ?? [],
+    extraHosts: deps.requestHostAllowlist,
+  })));
 
   // OPR.0.4.6.MH2 FR-2/FR-7 — the single-host READ-THROUGH edge (the read
   // twin of the mission-control remote-forward). Consumes a `?host=<id>`
