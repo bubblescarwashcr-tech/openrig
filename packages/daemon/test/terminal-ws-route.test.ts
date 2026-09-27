@@ -5,6 +5,7 @@ import { serve, type ServerType } from "@hono/node-server";
 import http from "node:http";
 import * as fs from "node:fs";
 import { registerTerminalWs } from "../src/routes/terminal-ws.js";
+import { buildAllowedHosts, originHostGuard } from "../src/middleware/origin-host-guard.js";
 
 const TOKEN = "test-ws-route-token";
 const PORT = 19876;
@@ -25,6 +26,8 @@ beforeAll(async () => {
     });
     await next();
   });
+  // S4c — mounted as server.ts mounts it (before registerTerminalWs), loopback-only bind.
+  app.use("/api/*", originHostGuard(buildAllowedHosts({ bindHosts: ["127.0.0.1"] })));
   const { injectWebSocket, upgradeWebSocket } = createNodeWebSocket({ app });
   registerTerminalWs(app, upgradeWebSocket as never, { bearerToken: TOKEN });
   server = serve({ fetch: app.fetch, port: PORT, hostname: "127.0.0.1" });
@@ -86,6 +89,17 @@ describe("terminal WebSocket route (production path)", () => {
     const result = await rawUpgrade(
       `/api/terminal/test-session?token=${TOKEN}`,
       { Origin: "http://evil.example.com" },
+    );
+    expect(result.statusCode).toBe(403);
+  });
+
+  // S4c — the terminal route's own check only compares Origin to Host, so a DNS-rebinding page
+  // (Origin and Host both the attacker's name, resolved to 127.0.0.1) passed it and got a live,
+  // input-capable terminal socket. The /api/* guard checks both against the bound-host allowlist.
+  it("DNS-rebinding shape (Origin == Host == attacker name) returns 403", async () => {
+    const result = await rawUpgrade(
+      `/api/terminal/test-session?token=${TOKEN}`,
+      { Origin: `http://rebind.evil.example.com:${PORT}`, Host: `rebind.evil.example.com:${PORT}` },
     );
     expect(result.statusCode).toBe(403);
   });

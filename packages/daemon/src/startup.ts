@@ -166,6 +166,8 @@ interface DaemonOptions {
    *  computed once in index.ts and exposed on /healthz so adoption gates verify
    *  listeners by binding evidence. Absent (tests/legacy) = healthz body unchanged. */
   bindPlan?: import("./domain/bind-plan.js").BindPlan;
+  /** S4c — extra hostnames for the /api/* Origin/Host guard (see server.ts AppDeps). */
+  requestHostAllowlist?: string[];
   tmuxExec?: ExecFn;
   cmuxExec?: ExecFn;
   cmuxFactory?: CmuxTransportFactory;
@@ -2289,6 +2291,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   deps.routeTimingRecorder = routeTimingRecorder;
   // S20 — bind provenance rides the health surface (absent = legacy healthz body).
   deps.bindPlan = opts?.bindPlan;
+  deps.requestHostAllowlist = opts?.requestHostAllowlist;
 
   // Hermeticity (hotfix qitem-20260822230440-da0d2ad6 FIX 2): the REAL daemon
   // constructs the drift observer here with an eagerly-warmed mode cache — the
