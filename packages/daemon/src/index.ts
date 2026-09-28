@@ -1,5 +1,6 @@
 import { serve, type ServerType } from "@hono/node-server";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { createDaemonShutdown, DAEMON_SHUTDOWN_RECEIPT } from "./daemon-shutdown.js";
 import { readOpenRigEnv, OPENRIG_HOME } from "./openrig-compat.js";
 import { makeOperatorDeliveryEngine } from "./domain/gateway/operator-delivery-engine.js";
@@ -25,6 +26,7 @@ import {
   isTailscaleBind,
   resolveToIpOrNull,
 } from "./middleware/auth-bearer-token.js";
+import { resolveExtraAllowedHosts } from "./middleware/origin-host-guard.js";
 import type { SlowOperationInstrumentation } from "./domain/slow-op-recorder.js";
 import type { ProviderService } from "./domain/provider/provider-service.js";
 import { SettingsStore } from "./domain/user-settings/settings-store.js";
@@ -294,10 +296,19 @@ export async function startServer(port?: number) {
     bindHosts = bindPlan.hosts;
   }
 
+  // S4c — names beyond the bound hosts that a legitimate browser may use (tailnet MagicDNS,
+  // operator OPENRIG_ALLOWED_HOSTS); consumed by the /api/* Origin/Host guard.
+  const requestHostAllowlist = await resolveExtraAllowedHosts({
+    bindHosts,
+    tailscaleDetected: bindPlan.tailscaleDetected,
+    envValue: process.env.OPENRIG_ALLOWED_HOSTS,
+  });
+
   const { app, contextMonitor, deps, eventLoopMonitor, injectWebSocket } = await createDaemon({
     dbPath,
     bearerToken,
     terminalBearerToken,
+    requestHostAllowlist,
     // S20 — the effective bind plan rides the health surface so adoption gates verify
     // listeners from BINDING EVIDENCE (probe each host) instead of config echo.
     bindPlan,
@@ -408,10 +419,19 @@ export async function startServer(port?: number) {
 }
 
 // Only start the server when this file is executed directly (not imported).
-const isDirectRun =
-  process.argv[1] &&
-  import.meta.url === `file://${process.argv[1]}`;
+// A hand-built `file://${path}` string never matches on Windows, where
+// process.argv[1] is a raw `C:\...` path and import.meta.url is a properly
+// encoded `file:///C:/...` URL — pathToFileURL handles that conversion (and
+// percent-encoding, e.g. spaces) the way import.meta.url does.
+export function isMainModule(importMetaUrl: string, argv1: string | undefined): boolean {
+  if (!argv1) return false;
+  try {
+    return importMetaUrl === pathToFileURL(path.resolve(argv1)).href;
+  } catch {
+    return false;
+  }
+}
 
-if (isDirectRun) {
+if (isMainModule(import.meta.url, process.argv[1])) {
   startServer();
 }

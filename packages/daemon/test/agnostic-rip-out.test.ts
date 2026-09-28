@@ -75,7 +75,8 @@ describe("OPR.0.4.8.2 agnostic rip-out — config-file policy writes stripped, l
     const frag = JSON.parse(fs.readFileSync(FRAGMENT_PATH, "utf8"));
     expect(Object.keys(frag.permissions)).toEqual(["defaultMode"]); // ONLY the floor key remains
     expect(frag.permissions.defaultMode).toBe("acceptEdits");
-    expect(frag.enabledMcpjsonServers).toEqual(["exa", "context7"]);
+    // Fork (bubbles/stable): exa (metered vendor) removed from the shipped default.
+    expect(frag.enabledMcpjsonServers).toEqual(["context7"]);
   });
 
   it("C2: a fresh startup authors NO ~/.claude/settings.json for permissions", async () => {
