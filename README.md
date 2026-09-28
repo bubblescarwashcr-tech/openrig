@@ -84,7 +84,7 @@ user's home; changing `OPENRIG_HOME` alone does not isolate provider configurati
   the context collector's `statusLine` command and selected activity hooks;
   helper scripts live under `.openrig/`. Selected settings/MCP resources can also
   change that settings file and `.mcp.json`. The shared settings resource sets
-  `permissions.defaultMode` to `acceptEdits` and enables Exa/Context7 MCP entries;
+  `permissions.defaultMode` to `acceptEdits` and enables the Context7 MCP entry;
   selected MCP resources configure those external services. Built-in bootstrap
   no longer writes a command allowlist to `~/.claude/settings.json` or removes
   older allowances. The trust writer uses the daemon home, so a custom
