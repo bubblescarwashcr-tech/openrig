@@ -72,3 +72,54 @@ describe("daemon startServer", () => {
     );
   });
 });
+
+describe("isMainModule (startup gate)", () => {
+  it("the old naive `file://${argv1}` comparison fails on a real Windows-shaped case (pre-fix bug)", () => {
+    // Realistic values as Node actually produces them on Windows: argv[1] is
+    // a raw backslash path, import.meta.url is a properly encoded file URL.
+    // This is the exact comparison the daemon used before the fix — asserted
+    // here as a standalone regression guard (not exercised via src/index.ts,
+    // since the buggy line no longer exists there).
+    const argv1 = "C:\\foo\\bar\\index.js";
+    const importMetaUrl = "file:///C:/foo/bar/index.js";
+    const naiveComparison = importMetaUrl === `file://${argv1}`;
+    expect(naiveComparison).toBe(false);
+  });
+
+  it("matches on a Windows-shaped argv[1] path", async () => {
+    const { isMainModule } = await import("../src/index.js");
+    const path = (await import("node:path")).default;
+    const { pathToFileURL } = await import("node:url");
+    const argv1 = "C:\\foo\\bar\\index.js";
+    // Built via the same primitives the fix uses, so this proves isMainModule
+    // correctly implements pathToFileURL(resolve(argv1)).href — the RED case
+    // above shows the old string-concat comparison rejects this same pairing.
+    const importMetaUrl = pathToFileURL(path.resolve(argv1)).href;
+
+    expect(isMainModule(importMetaUrl, argv1)).toBe(true);
+  });
+
+  it("matches on a POSIX-shaped argv[1] path", async () => {
+    const { isMainModule } = await import("../src/index.js");
+    const path = (await import("node:path")).default;
+    const { pathToFileURL } = await import("node:url");
+    const argv1 = "/home/user/index.js";
+    const importMetaUrl = pathToFileURL(path.resolve(argv1)).href;
+
+    expect(isMainModule(importMetaUrl, argv1)).toBe(true);
+  });
+
+  it("returns false when argv[1] is missing", async () => {
+    const { isMainModule } = await import("../src/index.js");
+
+    expect(isMainModule("file:///home/user/index.js", undefined)).toBe(false);
+  });
+
+  it("returns false when the file differs (imported, not the entry point)", async () => {
+    const { isMainModule } = await import("../src/index.js");
+    const argv1 = "C:\\foo\\bar\\index.js";
+    const importMetaUrl = "file:///C:/foo/other.js";
+
+    expect(isMainModule(importMetaUrl, argv1)).toBe(false);
+  });
+});

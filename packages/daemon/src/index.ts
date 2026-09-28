@@ -1,5 +1,6 @@
 import { serve, type ServerType } from "@hono/node-server";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { createDaemonShutdown, DAEMON_SHUTDOWN_RECEIPT } from "./daemon-shutdown.js";
 import { readOpenRigEnv, OPENRIG_HOME } from "./openrig-compat.js";
 import { makeOperatorDeliveryEngine } from "./domain/gateway/operator-delivery-engine.js";
@@ -418,10 +419,19 @@ export async function startServer(port?: number) {
 }
 
 // Only start the server when this file is executed directly (not imported).
-const isDirectRun =
-  process.argv[1] &&
-  import.meta.url === `file://${process.argv[1]}`;
+// A hand-built `file://${path}` string never matches on Windows, where
+// process.argv[1] is a raw `C:\...` path and import.meta.url is a properly
+// encoded `file:///C:/...` URL — pathToFileURL handles that conversion (and
+// percent-encoding, e.g. spaces) the way import.meta.url does.
+export function isMainModule(importMetaUrl: string, argv1: string | undefined): boolean {
+  if (!argv1) return false;
+  try {
+    return importMetaUrl === pathToFileURL(path.resolve(argv1)).href;
+  } catch {
+    return false;
+  }
+}
 
-if (isDirectRun) {
+if (isMainModule(import.meta.url, process.argv[1])) {
   startServer();
 }
