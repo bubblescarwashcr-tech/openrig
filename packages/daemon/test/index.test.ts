@@ -74,18 +74,6 @@ describe("daemon startServer", () => {
 });
 
 describe("isMainModule (startup gate)", () => {
-  it("the old naive `file://${argv1}` comparison fails on a real Windows-shaped case (pre-fix bug)", () => {
-    // Realistic values as Node actually produces them on Windows: argv[1] is
-    // a raw backslash path, import.meta.url is a properly encoded file URL.
-    // This is the exact comparison the daemon used before the fix — asserted
-    // here as a standalone regression guard (not exercised via src/index.ts,
-    // since the buggy line no longer exists there).
-    const argv1 = "C:\\foo\\bar\\index.js";
-    const importMetaUrl = "file:///C:/foo/bar/index.js";
-    const naiveComparison = importMetaUrl === `file://${argv1}`;
-    expect(naiveComparison).toBe(false);
-  });
-
   it("matches on a Windows-shaped argv[1] path", async () => {
     const { isMainModule } = await import("../src/index.js");
     const path = (await import("node:path")).default;
