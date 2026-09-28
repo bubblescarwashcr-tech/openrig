@@ -7,6 +7,7 @@ import { readHealthArtifact, healthAuthority, healthHumanReadiness } from "./dom
 import type { Hono } from "hono";
 import type Database from "better-sqlite3";
 import type { ExecFn } from "./adapters/tmux.js";
+import { fileURLToPath } from "node:url";
 import type { CmuxTransportFactory } from "./adapters/cmux.js";
 import { createDb } from "./db/connection.js";
 import { migrate } from "./db/migrate.js";
@@ -905,7 +906,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       sessionRegistry,
       eventBus,
       bootstrapOrchestrator,
-      specsDir: nodePath.resolve(nodePath.dirname(new URL(import.meta.url).pathname), "..", "specs"),
+      specsDir: nodePath.resolve(nodePath.dirname(fileURLToPath(new URL(import.meta.url))), "..", "specs"),
       // V0.3.1 slice 05 — kernel members run against the operator's
       // workspace, not the daemon installation tree. Without this
       // cwdOverride, BootstrapOrchestrator refuses with
@@ -1769,7 +1770,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // the same daemon endpoint.
     deps.skillLibraryDiscoveryService = new SkillLibraryDiscoveryService({
       sharedSkillsDir: nodePath.resolve(
-        nodePath.dirname(new URL(import.meta.url).pathname),
+        nodePath.dirname(fileURLToPath(new URL(import.meta.url))),
         "..",
         "specs",
         "agents",
