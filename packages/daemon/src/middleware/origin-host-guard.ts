@@ -7,10 +7,17 @@
 //   - Origin allowlisted: blocks ordinary cross-site requests.
 //   - Host allowlisted: blocks DNS rebinding, where Origin and Host are BOTH the attacker's name
 //     (the gap terminal-ws.ts's Origin-equals-Host check leaves open).
-// Requests with NO Origin header (CLI, relays, activity hooks — non-browser clients) pass
+// Writes with NO Origin header (CLI, relays, activity hooks — non-browser clients) pass
 // unchanged: browsers always send Origin on non-GET requests and WebSocket upgrades, so its
-// absence is not a browser attack path. Plain GET/HEAD/OPTIONS reads are out of scope, but
-// WebSocket upgrades are guarded because the terminal socket accepts keystrokes.
+// absence is not a browser attack path. WebSocket upgrades are guarded because the terminal
+// socket accepts keystrokes.
+//
+// Plain GET/HEAD/OPTIONS reads get the Host check only, always. A cross-origin page cannot read
+// a response (no CORS headers), but a DNS-rebinding page is same-origin with the daemon: its GET
+// carries no Origin, and no Sec-Fetch-* either (Fetch Metadata is only sent to potentially
+// trustworthy URLs, and http://<attacker-name> is not one). Its Host header is the attacker's name,
+// which page script can neither set nor omit. A non-browser client that reaches the daemon by some
+// other name must list it in OPENRIG_ALLOWED_HOSTS.
 //
 // Hand-rolled rather than Hono's csrf() so the no-Origin pass-through and the Host check are
 // explicit and pinned by tests.
@@ -22,6 +29,7 @@ import { isLoopbackBind, isTailscaleBind } from "./auth-bearer-token.js";
 
 const READ_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 const WILDCARD_BINDS = new Set(["0.0.0.0", "::", "[::]"]);
+const UNSPECIFIED_HOSTS = new Set(["0.0.0.0", "[::]"]);
 const LOOPBACK_IPV4 = /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/;
 
 /** Canonical comparison form: lowercase, IPv6 bracketed, no trailing dot. Null if unparseable. */
@@ -73,13 +81,13 @@ export function buildAllowedHosts(input: {
   return allowed;
 }
 
-function originRejected(what: string) {
+function originRejected(what: string, kind: "write" | "read" = "write") {
   return {
     error: "origin_rejected" as const,
-    message: `Cross-origin write refused: ${what}`,
+    message: `Cross-origin ${kind} refused: ${what}`,
     what_failed: what,
     why_it_matters:
-      "A web page on another origin (or a DNS-rebinding page) must not be able to drive seats or approve permission prompts through this daemon.",
+      "A web page on another origin (or a DNS-rebinding page) must not be able to drive seats, approve permission prompts, or read transcripts, logs, or files through this daemon.",
     what_to_do:
       "Open the UI via a host the daemon is bound to (loopback, its tailnet IP, or its MagicDNS name). To admit another hostname, list it in OPENRIG_ALLOWED_HOSTS (comma-separated) and restart the daemon.",
   };
@@ -90,7 +98,16 @@ export function originHostGuard(allowed: ReadonlySet<string>): MiddlewareHandler
     hostname !== null && (allowed.has(hostname) || isLoopbackHostname(hostname));
   return async (c, next) => {
     const isWebSocketUpgrade = c.req.header("Upgrade")?.toLowerCase() === "websocket";
-    if (READ_METHODS.has(c.req.method) && !isWebSocketUpgrade) return next();
+    if (READ_METHODS.has(c.req.method) && !isWebSocketUpgrade) {
+      const hostHeader = c.req.header("Host") ?? new URL(c.req.url).host;
+      const readHost = canonicalHostname(hostHeader);
+      // The CLI dials a wildcard-bound daemon at its persisted bind host (http://0.0.0.0:<port>).
+      // Safe to admit: a rebinding page's Host is its own DNS name, never an address literal.
+      if (!isAllowed(readHost) && !(readHost !== null && UNSPECIFIED_HOSTS.has(readHost))) {
+        return c.json(originRejected(`Host '${hostHeader}' is not a host this daemon serves`, "read"), 403);
+      }
+      return next();
+    }
     const origin = c.req.header("Origin");
     if (origin === undefined) return next();
 

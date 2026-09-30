@@ -109,11 +109,76 @@ describe("originHostGuard", () => {
     expect(res.status).toBe(403);
   });
 
-  it("leaves plain reads alone (GET without Upgrade is out of this guard's scope)", async () => {
+  it("does not Origin-check plain reads (a cross-origin page cannot read the response without CORS; only Host is checked)", async () => {
     const res = await guardedApp(loopbackOnly).request("http://127.0.0.1:7433/api/read", {
       headers: { Origin: "http://evil.example.com", Host: "127.0.0.1:7433" },
     });
     expect(res.status).toBe(200);
+  });
+
+  // Reads and DNS rebinding. After rebinding, the attacker's page is same-origin with the daemon, so
+  // its fetch() GET carries no Origin; and because http://<attacker-name> is not a potentially
+  // trustworthy URL, the browser sends no Sec-Fetch-* headers either (Fetch Metadata spec; observed
+  // in Chromium 145). The headers below are exactly what Chromium sent. Host is the one signal a
+  // page cannot set or hide, so reads are Host-checked unconditionally.
+  it("rejects a DNS-rebinding read: GET with a foreign Host and no Origin or Sec-Fetch-* (the real browser shape over http)", async () => {
+    const res = await guardedApp(loopbackOnly).request("http://rebind.evil.example.com:7433/api/read", {
+      headers: {
+        Host: "rebind.evil.example.com:7433",
+        Accept: "*/*",
+        Referer: "http://rebind.evil.example.com:7433/",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+      },
+    });
+    expect(res.status).toBe(403);
+    expect((await res.json()).error).toBe("origin_rejected");
+  });
+
+  it("rejects a DNS-rebinding read that does carry Sec-Fetch-* headers", async () => {
+    const res = await guardedApp(loopbackOnly).request("http://rebind.evil.example.com:7433/api/read", {
+      headers: { Host: "rebind.evil.example.com:7433", "Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "cors" },
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it("rejects HEAD and OPTIONS with a foreign Host too", async () => {
+    const app = guardedApp(loopbackOnly);
+    for (const method of ["HEAD", "OPTIONS"]) {
+      const res = await app.request("http://rebind.evil.example.com:7433/api/read", {
+        method,
+        headers: { Host: "rebind.evil.example.com:7433" },
+      });
+      expect(res.status, method).toBe(403);
+    }
+  });
+
+  it("passes a same-host browser read (loopback Host, Sec-Fetch-Site: same-origin)", async () => {
+    const res = await guardedApp(loopbackOnly).request("http://localhost:7433/api/read", {
+      headers: { Host: "localhost:7433", "Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "cors", "Sec-Fetch-Dest": "empty" },
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it("passes non-browser reads (CLI, relays) that address the daemon by a name it serves, with or without a Host header", async () => {
+    const app = guardedApp(loopbackOnly);
+    const cli = await app.request("http://127.0.0.1:7433/api/read", { headers: { Host: "127.0.0.1:7433", "User-Agent": "node" } });
+    expect(cli.status).toBe(200);
+    const noHost = await app.request("/api/read");
+    expect(noHost.status).toBe(200);
+  });
+
+  it("passes CLI reads to a wildcard-bound daemon (the CLI dials the persisted bind host, http://0.0.0.0:<port>)", async () => {
+    const app = guardedApp(buildAllowedHosts({ bindHosts: ["0.0.0.0"], interfaceAddresses: () => [], hostname: () => "box" }));
+    const res = await app.request("http://0.0.0.0:7433/api/read", { headers: { Host: "0.0.0.0:7433" } });
+    expect(res.status).toBe(200);
+  });
+
+  it("passes reads addressed to the daemon's tailnet IP or MagicDNS name", async () => {
+    const app = guardedApp(buildAllowedHosts({ bindHosts: ["127.0.0.1", "100.101.102.103"], extraHosts: ["box.tail1234.ts.net"] }));
+    for (const host of ["100.101.102.103:7433", "box.tail1234.ts.net:7433"]) {
+      const res = await app.request(`http://${host}/api/read`, { headers: { Host: host } });
+      expect(res.status, host).toBe(200);
+    }
   });
 
   it("tailnet: admits the exact MagicDNS name, rejects any other *.ts.net name", async () => {

@@ -487,6 +487,31 @@ describe("S4c — Origin/Host guard on /api/* (production app)", () => {
     cleanup();
   });
 
+  it("DNS-rebinding READ (GET /api/rigs, foreign Host, no Origin / Sec-Fetch-*) is rejected 403 and leaks no rig data", async () => {
+    const { app, cleanup } = buildGuardedApp();
+    const res = await app.request("http://rebind.evil.example.com:7433/api/rigs", {
+      headers: { Host: "rebind.evil.example.com:7433", Accept: "*/*" },
+    });
+    expect(res.status).toBe(403);
+    const body = await res.text();
+    expect(body).toContain("origin_rejected");
+    expect(body).not.toContain("my-rig");
+    cleanup();
+  });
+
+  it("legitimate reads still work: the UI (loopback Host + Sec-Fetch) and the CLI (no browser headers) both list rigs", async () => {
+    const { app, cleanup } = buildGuardedApp();
+    const ui = await app.request("http://127.0.0.1:7433/api/rigs", {
+      headers: { Host: "127.0.0.1:7433", "Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "cors" },
+    });
+    expect(ui.status).toBe(200);
+    expect(JSON.stringify(await ui.json())).toContain("my-rig");
+    const cli = await app.request("/api/rigs");
+    expect(cli.status).toBe(200);
+    expect(JSON.stringify(await cli.json())).toContain("my-rig");
+    cleanup();
+  });
+
   it("tailnet bind: a DIFFERENT ts.net name (e.g. someone else's public Funnel page) is still rejected", async () => {
     const { app, sendText, cleanup } = buildGuardedApp({
       bindPlan: { mode: "default", hosts: ["127.0.0.1", "100.101.102.103"], tailscaleDetected: true },
