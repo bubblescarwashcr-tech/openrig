@@ -53,11 +53,41 @@ describe("originHostGuard", () => {
     expect(res.status).toBe(200);
   });
 
-  it("passes a loopback Origin on any port (the Vite dev UI on :5173 proxies to the daemon)", async () => {
+  it("passes a loopback Origin on the daemon's own port (any loopback spelling)", async () => {
     const app = guardedApp(loopbackOnly);
-    for (const origin of ["http://127.0.0.1:7433", "http://localhost:5173", "http://[::1]:7433"]) {
+    for (const origin of ["http://127.0.0.1:7433", "http://localhost:7433", "http://[::1]:7433"]) {
       const res = await post(app, "http://127.0.0.1:7433/api/write", { Origin: origin, Host: "127.0.0.1:7433" });
       expect(res.status, origin).toBe(200);
+    }
+  });
+
+  // Another web app on this machine's loopback (a dashboard, a dev server) is a different origin.
+  // Its hostname is loopback, so only the port tells it apart from the daemon's own UI.
+  it("rejects a loopback Origin on a different port (another local web app)", async () => {
+    const app = guardedApp(loopbackOnly);
+    for (const origin of ["http://localhost:9999", "http://127.0.0.1:3847", "http://localhost:5173", "http://localhost"]) {
+      const res = await post(app, "http://127.0.0.1:7433/api/write", { Origin: origin, Host: "127.0.0.1:7433" });
+      expect(res.status, origin).toBe(403);
+      expect((await res.json()).error, origin).toBe("origin_rejected");
+    }
+  });
+
+  it("rejects a WebSocket upgrade from a loopback Origin on a different port", async () => {
+    const res = await guardedApp(loopbackOnly).request("http://127.0.0.1:7433/api/read", {
+      headers: { Upgrade: "websocket", Origin: "http://localhost:9999", Host: "127.0.0.1:7433" },
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it("normalizes default ports (https Origin with no port vs Host with :443 or none)", async () => {
+    const app = guardedApp(buildAllowedHosts({ bindHosts: ["127.0.0.1"], extraHosts: ["box.tail1234.ts.net"] }));
+    for (const host of ["box.tail1234.ts.net", "box.tail1234.ts.net:443"]) {
+      const res = await post(app, "http://box.tail1234.ts.net/api/write", { Origin: "https://box.tail1234.ts.net", Host: host });
+      expect(res.status, host).toBe(200);
+    }
+    for (const host of ["box.tail1234.ts.net:7433", "box.tail1234.ts.net:80"]) {
+      const mismatch = await post(app, "http://box.tail1234.ts.net/api/write", { Origin: "https://box.tail1234.ts.net", Host: host });
+      expect(mismatch.status, host).toBe(403);
     }
   });
 

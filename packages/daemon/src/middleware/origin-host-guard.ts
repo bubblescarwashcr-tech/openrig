@@ -7,6 +7,7 @@
 //   - Origin allowlisted: blocks ordinary cross-site requests.
 //   - Host allowlisted: blocks DNS rebinding, where Origin and Host are BOTH the attacker's name
 //     (the gap terminal-ws.ts's Origin-equals-Host check leaves open).
+//   - Origin port equals the Host port: blocks other web apps on this machine's loopback.
 // Writes with NO Origin header (CLI, relays, activity hooks — non-browser clients) pass
 // unchanged: browsers always send Origin on non-GET requests and WebSocket upgrades, so its
 // absence is not a browser attack path. WebSocket upgrades are guarded because the terminal
@@ -31,6 +32,17 @@ const READ_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 const WILDCARD_BINDS = new Set(["0.0.0.0", "::", "[::]"]);
 const UNSPECIFIED_HOSTS = new Set(["0.0.0.0", "[::]"]);
 const LOOPBACK_IPV4 = /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/;
+const DEFAULT_PORTS: Record<string, string> = { "http:": "80", "https:": "443" };
+
+/** Port a Host header names; `defaultPort` if it names none. Null if unparseable. */
+function requestPort(hostOrHostPort: string, defaultPort: string): string | null {
+  try {
+    // Non-special scheme: an http: URL would erase an explicit ":80", making it read as the default.
+    return new URL(`x://${hostOrHostPort.trim()}`).port || defaultPort;
+  } catch {
+    return null;
+  }
+}
 
 /** Canonical comparison form: lowercase, IPv6 bracketed, no trailing dot. Null if unparseable. */
 function canonicalHostname(hostOrHostPort: string): string | null {
@@ -112,9 +124,13 @@ export function originHostGuard(allowed: ReadonlySet<string>): MiddlewareHandler
     if (origin === undefined) return next();
 
     let originHost: string | null = null;
+    let originPort = "";
     try {
       const url = new URL(origin);
-      if (url.protocol === "http:" || url.protocol === "https:") originHost = canonicalHostname(url.host);
+      if (url.protocol === "http:" || url.protocol === "https:") {
+        originHost = canonicalHostname(url.host);
+        originPort = url.port || DEFAULT_PORTS[url.protocol]!;
+      }
     } catch {
       originHost = null;
     }
@@ -123,6 +139,13 @@ export function originHostGuard(allowed: ReadonlySet<string>): MiddlewareHandler
     const hostHeader = c.req.header("Host") ?? new URL(c.req.url).host;
     if (!isAllowed(canonicalHostname(hostHeader))) {
       return c.json(originRejected(`Host '${hostHeader}' is not a host this daemon serves`), 403);
+    }
+    // The UI is served by the daemon itself, so a legitimate Origin's port is the port the request
+    // was sent to. Loopback is admitted under any name, so without this check another web app on
+    // this machine's loopback (http://localhost:<other port>) would pass. A Host with no port means
+    // the Origin scheme's default port.
+    if (originPort !== requestPort(hostHeader, originPort)) {
+      return c.json(originRejected(`Origin '${origin}' is on a different port than this daemon`), 403);
     }
     return next();
   };

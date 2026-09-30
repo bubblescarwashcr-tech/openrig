@@ -72,7 +72,7 @@ describe("terminal WebSocket route (production path)", () => {
   it("valid token WS upgrade does NOT return 404 (the QA blocker regression)", async () => {
     const result = await rawUpgrade(
       `/api/terminal/test-session?token=${TOKEN}`,
-      { Origin: "http://127.0.0.1" },
+      { Origin: `http://127.0.0.1:${PORT}` },
     );
     expect(result.statusCode, `expected non-404, got ${result.statusCode}: ${result.body}`).not.toBe(404);
   });
@@ -80,7 +80,7 @@ describe("terminal WebSocket route (production path)", () => {
   it("missing token returns 401", async () => {
     const result = await rawUpgrade(
       "/api/terminal/test-session",
-      { Origin: "http://127.0.0.1" },
+      { Origin: `http://127.0.0.1:${PORT}` },
     );
     expect(result.statusCode).toBe(401);
   });
@@ -107,7 +107,7 @@ describe("terminal WebSocket route (production path)", () => {
   it("wrong token returns 401", async () => {
     const result = await rawUpgrade(
       `/api/terminal/test-session?token=wrong`,
-      { Origin: "http://127.0.0.1" },
+      { Origin: `http://127.0.0.1:${PORT}` },
     );
     expect(result.statusCode).toBe(401);
   });
