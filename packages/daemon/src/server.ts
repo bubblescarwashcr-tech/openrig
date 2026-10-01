@@ -139,7 +139,7 @@ import { envRoutes } from "./routes/env.js";
 import type { RigLifecycleService } from "./domain/rig-lifecycle-service.js";
 import { seatRoutes } from "./routes/seat.js";
 import { createRouteTimingMiddleware } from "./domain/route-timing-recorder.js";
-import { buildAllowedHosts, originHostGuard } from "./middleware/origin-host-guard.js";
+import { buildAllowedHosts, hasWildcardBind, originHostGuard } from "./middleware/origin-host-guard.js";
 
 export interface AppDeps {
   proofSourceWatch?: import("./domain/proof/source-watch.js").ProofSourceWatch;
@@ -621,10 +621,11 @@ export function createApp(deps: AppDeps): Hono {
   // S4c — refuse browser-originated writes (and WebSocket upgrades) whose Origin or Host is not
   // one of this daemon's own names, and any read whose Host is not (DNS rebinding). Registered
   // before every /api route and the read-through edge.
+  const guardBindHosts = deps.bindPlan?.hosts ?? [];
   app.use("/api/*", originHostGuard(buildAllowedHosts({
-    bindHosts: deps.bindPlan?.hosts ?? [],
+    bindHosts: guardBindHosts,
     extraHosts: deps.requestHostAllowlist,
-  })));
+  }), hasWildcardBind(guardBindHosts)));
 
   // OPR.0.4.6.MH2 FR-2/FR-7 — the single-host READ-THROUGH edge (the read
   // twin of the mission-control remote-forward). Consumes a `?host=<id>`

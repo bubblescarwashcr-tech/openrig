@@ -63,6 +63,11 @@ function isLoopbackHostname(hostname: string): boolean {
   return hostname === "localhost" || hostname === "[::1]" || LOOPBACK_IPV4.test(hostname);
 }
 
+/** True when the bind plan includes an unspecified (wildcard) address: 0.0.0.0, ::, or [::]. */
+export function hasWildcardBind(bindHosts: readonly string[]): boolean {
+  return bindHosts.some((h) => WILDCARD_BINDS.has(h.trim()));
+}
+
 function defaultInterfaceAddresses(): string[] {
   return Object.values(networkInterfaces()).flatMap((addrs) => (addrs ?? []).map((a) => a.address));
 }
@@ -80,7 +85,7 @@ export function buildAllowedHosts(input: {
   hostname?: () => string;
 }): Set<string> {
   const raw = ["localhost", "127.0.0.1", "::1", ...input.bindHosts, ...(input.extraHosts ?? [])];
-  if (input.bindHosts.some((h) => WILDCARD_BINDS.has(h.trim()))) {
+  if (hasWildcardBind(input.bindHosts)) {
     raw.push(...(input.interfaceAddresses ?? defaultInterfaceAddresses)());
     raw.push((input.hostname ?? osHostname)());
   }
@@ -105,7 +110,12 @@ function originRejected(what: string, kind: "write" | "read" = "write") {
   };
 }
 
-export function originHostGuard(allowed: ReadonlySet<string>): MiddlewareHandler {
+/**
+ * `wildcardBound` must be `hasWildcardBind(<the daemon's bind hosts>)`: true only when the daemon
+ * actually listens on 0.0.0.0 / ::. It is the sole condition under which a read with
+ * `Host: 0.0.0.0` or `Host: [::]` is admitted. Defaults to false (fail closed).
+ */
+export function originHostGuard(allowed: ReadonlySet<string>, wildcardBound = false): MiddlewareHandler {
   const isAllowed = (hostname: string | null) =>
     hostname !== null && (allowed.has(hostname) || isLoopbackHostname(hostname));
   return async (c, next) => {
@@ -113,9 +123,12 @@ export function originHostGuard(allowed: ReadonlySet<string>): MiddlewareHandler
     if (READ_METHODS.has(c.req.method) && !isWebSocketUpgrade) {
       const hostHeader = c.req.header("Host") ?? new URL(c.req.url).host;
       const readHost = canonicalHostname(hostHeader);
-      // The CLI dials a wildcard-bound daemon at its persisted bind host (http://0.0.0.0:<port>).
-      // Safe to admit: a rebinding page's Host is its own DNS name, never an address literal.
-      if (!isAllowed(readHost) && !(readHost !== null && UNSPECIFIED_HOSTS.has(readHost))) {
+      // The CLI dials a wildcard-bound daemon at its persisted bind host (http://0.0.0.0:<port>),
+      // so Host 0.0.0.0 / [::] is admitted ONLY when this daemon is actually wildcard-bound. Never
+      // unconditionally: a browser page can reach a loopback-bound daemon via http://0.0.0.0:<port>
+      // ("0.0.0.0 Day", Oligo 2024) and then sends exactly that Host.
+      const unspecifiedHostAdmitted = wildcardBound && readHost !== null && UNSPECIFIED_HOSTS.has(readHost);
+      if (!isAllowed(readHost) && !unspecifiedHostAdmitted) {
         return c.json(originRejected(`Host '${hostHeader}' is not a host this daemon serves`, "read"), 403);
       }
       return next();

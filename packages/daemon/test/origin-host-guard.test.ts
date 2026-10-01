@@ -1,10 +1,10 @@
 import { describe, it, expect, vi } from "vitest";
 import { Hono } from "hono";
-import { buildAllowedHosts, originHostGuard, resolveExtraAllowedHosts } from "../src/middleware/origin-host-guard.js";
+import { buildAllowedHosts, hasWildcardBind, originHostGuard, resolveExtraAllowedHosts } from "../src/middleware/origin-host-guard.js";
 
-function guardedApp(allowed: ReadonlySet<string>): Hono {
+function guardedApp(allowed: ReadonlySet<string>, wildcardBound = false): Hono {
   const app = new Hono();
-  app.use("/api/*", originHostGuard(allowed));
+  app.use("/api/*", originHostGuard(allowed, wildcardBound));
   app.post("/api/write", async (c) => c.json({ ok: true, body: await c.req.text() }));
   app.get("/api/read", (c) => c.json({ ok: true }));
   return app;
@@ -42,6 +42,17 @@ describe("buildAllowedHosts", () => {
     expect(hosts.has("100.101.102.103")).toBe(true);
     expect(hosts.has("mybox")).toBe(true);
     expect(hosts.has("0.0.0.0")).toBe(false);
+  });
+});
+
+describe("hasWildcardBind", () => {
+  it("is true only when a bind host is an unspecified address (0.0.0.0, ::, [::])", () => {
+    for (const bindHosts of [["0.0.0.0"], ["::"], ["[::]"], [" 0.0.0.0 "], ["127.0.0.1", "::"]]) {
+      expect(hasWildcardBind(bindHosts), JSON.stringify(bindHosts)).toBe(true);
+    }
+    for (const bindHosts of [[], ["127.0.0.1"], ["::1"], ["127.0.0.1", "100.101.102.103"], ["localhost"]]) {
+      expect(hasWildcardBind(bindHosts), JSON.stringify(bindHosts)).toBe(false);
+    }
   });
 });
 
@@ -198,9 +209,49 @@ describe("originHostGuard", () => {
   });
 
   it("passes CLI reads to a wildcard-bound daemon (the CLI dials the persisted bind host, http://0.0.0.0:<port>)", async () => {
-    const app = guardedApp(buildAllowedHosts({ bindHosts: ["0.0.0.0"], interfaceAddresses: () => [], hostname: () => "box" }));
+    for (const bind of ["0.0.0.0", "::", "[::]"]) {
+      const bindHosts = [bind];
+      const app = guardedApp(
+        buildAllowedHosts({ bindHosts, interfaceAddresses: () => [], hostname: () => "box" }),
+        hasWildcardBind(bindHosts),
+      );
+      for (const host of ["0.0.0.0:7433", "[::]:7433"]) {
+        const res = await app.request(`http://${host}/api/read`, { headers: { Host: host } });
+        expect(res.status, `bind ${bind}, Host ${host}`).toBe(200);
+      }
+    }
+  });
+
+  // "0.0.0.0 Day" (Oligo Security, 2024): a web page can reach a loopback-bound service via
+  // http://0.0.0.0:<port>/, and the browser then sends `Host: 0.0.0.0:<port>`. The unspecified-
+  // address carve-out exists only for the CLI dialing a wildcard-bound daemon at its bind host, so
+  // a daemon that is NOT wildcard-bound must not admit it — whatever Origin (or none) rides along.
+  it("rejects reads with Host 0.0.0.0 / [::] on a daemon that is not wildcard-bound", async () => {
+    for (const bindHosts of [["127.0.0.1"], ["127.0.0.1", "100.101.102.103"], []]) {
+      const app = guardedApp(buildAllowedHosts({ bindHosts }), hasWildcardBind(bindHosts));
+      for (const host of ["0.0.0.0:7433", "[::]:7433", "0.0.0.0"]) {
+        for (const origin of [undefined, "http://evil.example.com", "http://0.0.0.0:7433"]) {
+          const label = `bind ${JSON.stringify(bindHosts)}, Host ${host}, Origin ${origin}`;
+          for (const method of ["GET", "HEAD", "OPTIONS"]) {
+            const res = await app.request(`http://${host}/api/read`, {
+              method,
+              headers: { Host: host, ...(origin ? { Origin: origin } : {}) },
+            });
+            expect(res.status, `${method} ${label}`).toBe(403);
+          }
+          const res = await app.request(`http://${host}/api/read`, { headers: { Host: host, ...(origin ? { Origin: origin } : {}) } });
+          expect((await res.json()).error, label).toBe("origin_rejected");
+        }
+      }
+    }
+  });
+
+  it("fails closed: originHostGuard without the wildcard flag does not admit Host 0.0.0.0 reads", async () => {
+    const app = new Hono();
+    app.use("/api/*", originHostGuard(buildAllowedHosts({ bindHosts: ["127.0.0.1"] })));
+    app.get("/api/read", (c) => c.json({ ok: true }));
     const res = await app.request("http://0.0.0.0:7433/api/read", { headers: { Host: "0.0.0.0:7433" } });
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(403);
   });
 
   it("passes reads addressed to the daemon's tailnet IP or MagicDNS name", async () => {

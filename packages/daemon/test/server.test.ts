@@ -512,6 +512,38 @@ describe("S4c — Origin/Host guard on /api/* (production app)", () => {
     cleanup();
   });
 
+  // "0.0.0.0 Day": a page reaches a loopback-bound daemon via http://0.0.0.0:<port>, Host 0.0.0.0.
+  it("loopback-only (or no) bind plan: a READ with Host 0.0.0.0 / [::] is rejected 403 and leaks no rig data", async () => {
+    for (const extra of [undefined, { bindPlan: { mode: "default" as const, hosts: ["127.0.0.1"], tailscaleDetected: false } }]) {
+      const { app, cleanup } = buildGuardedApp(extra);
+      for (const host of ["0.0.0.0:7433", "[::]:7433"]) {
+        for (const origin of [undefined, "http://evil.example.com"]) {
+          const res = await app.request(`http://${host}/api/rigs`, {
+            headers: { Host: host, Accept: "*/*", ...(origin ? { Origin: origin } : {}) },
+          });
+          const label = `${JSON.stringify(extra?.bindPlan?.hosts)} ${host} ${origin}`;
+          expect(res.status, label).toBe(403);
+          const body = await res.text();
+          expect(body, label).toContain("origin_rejected");
+          expect(body, label).not.toContain("my-rig");
+        }
+      }
+      cleanup();
+    }
+  });
+
+  it("wildcard bind plan: the CLI's read at its persisted bind host (Host 0.0.0.0 / [::]) still lists rigs", async () => {
+    for (const bind of ["0.0.0.0", "::"]) {
+      const { app, cleanup } = buildGuardedApp({ bindPlan: { mode: "explicit", hosts: [bind], tailscaleDetected: false } });
+      for (const host of ["0.0.0.0:7433", "[::]:7433"]) {
+        const res = await app.request(`http://${host}/api/rigs`, { headers: { Host: host } });
+        expect(res.status, `${bind} ${host}`).toBe(200);
+        expect(JSON.stringify(await res.json()), `${bind} ${host}`).toContain("my-rig");
+      }
+      cleanup();
+    }
+  });
+
   it("tailnet bind: a DIFFERENT ts.net name (e.g. someone else's public Funnel page) is still rejected", async () => {
     const { app, sendText, cleanup } = buildGuardedApp({
       bindPlan: { mode: "default", hosts: ["127.0.0.1", "100.101.102.103"], tailscaleDetected: true },
